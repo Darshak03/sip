@@ -17,6 +17,7 @@ package sip
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"testing"
@@ -1114,5 +1115,70 @@ func TestInboundByeOverInviteConnection(t *testing.T) {
 	t.Run("UDP", func(t *testing.T) {
 		_, ic := st.CreateInboundCall(t)
 		require.False(t, inviteConnOpen(ic))
+	})
+}
+
+// viaTLS is what a peer behind a TLS-ending load balancer sends: the INVITE reaches us over TCP, its Via says TLS.
+func viaTLS(req *sip.Request, _ *sip.Response) {
+	via := &sip.ViaHeader{
+		ProtocolName:    "SIP",
+		ProtocolVersion: "2.0",
+		Transport:       "TLS",
+		Host:            "127.0.0.1",
+		Params:          sip.NewParams(),
+	}
+	via.Params.Add("branch", sip.GenerateBranchN(16))
+	req.PrependHeader(via)
+}
+
+func withoutContact(req *sip.Request, _ *sip.Response) {
+	req.RemoveHeader("Contact")
+}
+
+func TestInboundByeWhenTLSEndsInFront(t *testing.T) {
+	st := NewServiceTest(t, nil)
+
+	t.Run("BYE to Contact is TLS", func(t *testing.T) {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = l.Close() })
+		first := make(chan byte, 1)
+		go func() {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			b := make([]byte, 1)
+			if _, err := io.ReadFull(conn, b); err == nil {
+				first <- b[0]
+			}
+		}()
+		contact := sip.Uri{Scheme: "sip", Host: "127.0.0.1", Port: l.Addr().(*net.TCPAddr).Port, UriParams: sip.NewParams()}
+		contact.UriParams.Add("transport", "tls")
+
+		_, ic := st.CreateInboundCall(t, overTCP, viaTLS, withContact(contact))
+		require.False(t, inviteConnOpen(ic), "the INVITE connection is in the TCP pool, so there is no fallback to it")
+		require.NoError(t, ic.Close())
+		select {
+		case b := <-first:
+			require.Equal(t, byte(0x16), b, "expected a TLS handshake record, not a plain-text BYE")
+		case <-time.After(5 * time.Second):
+			t.Fatal("no connection to the Contact")
+		}
+	})
+
+	t.Run("REFER to Contact is TLS", func(t *testing.T) {
+		contact := sip.Uri{Scheme: "sip", Host: "127.0.0.1", Port: 5061, UriParams: sip.NewParams()}
+		contact.UriParams.Add("transport", "tls")
+		_, ic := st.CreateInboundCall(t, overTCP, viaTLS, withContact(contact))
+		req, err := ic.cc.newReferReq("tel:+15551234567", nil)
+		require.NoError(t, err)
+		require.Equal(t, "TLS", req.Transport())
+	})
+
+	t.Run("no Contact: BYE over the INVITE connection", func(t *testing.T) {
+		call, ic := st.CreateInboundCall(t, overTCP, viaTLS, withoutContact)
+		closeAndExpectBye(t, call, ic)
 	})
 }
