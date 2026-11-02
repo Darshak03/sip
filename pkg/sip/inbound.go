@@ -2599,6 +2599,11 @@ func (c *sipInbound) swapSrcDst(req *sip.Request) (fallback string) {
 		dest = ConvertURI(&route.Address).GetDest()
 		fallback = ""
 	}
+	if c.legTr == TransportTLS && dest != c.inviteOk.Destination() {
+		// TLS may end on a load balancer in front of us, so the INVITE came in over TCP.
+		// A new connection to the peer must still be TLS.
+		req.SetTransport("TLS")
+	}
 	req.SetSource(c.inviteOk.Source())
 	req.SetDestination(dest)
 	req.RemoveHeader("From")

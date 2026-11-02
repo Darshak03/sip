@@ -50,6 +50,20 @@ func ConfigureTLS(c *tls.Config) {
 	}
 }
 
+// dialTLSConfig is used for outgoing TLS when we have no TLS listener, e.g. when a load balancer in front ends TLS.
+// A peer dialed by hostname must match it. A peer dialed by IP is checked on its chain only, as ConfigureTLS does.
+func dialTLSConfig() *tls.Config {
+	c := &tls.Config{}
+	ConfigureTLS(c)
+	c.VerifyConnection = func(cs tls.ConnectionState) error {
+		if cs.ServerName == "" { // the SNI we sent, which is empty for an IP address
+			return nil
+		}
+		return cs.PeerCertificates[0].VerifyHostname(cs.ServerName)
+	}
+	return c
+}
+
 // defaultALPNProtocols is the default set of ALPN protocols for SIP over TLS.
 var defaultALPNProtocols = []string{"sip"}
 
